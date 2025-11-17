@@ -1,6 +1,6 @@
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:google_sign_in/google_sign_in.dart';
-import 'package:project_fyp/models/user_model.dart';
+import 'package:sin_ocr/models/user_model.dart';
 
 class AuthServices {
   //firebase instance
@@ -97,14 +97,22 @@ class AuthServices {
   }
 
   //signout
-  Future signOut() async {
+  Future<bool> signOut() async {
     try {
-      await _googleSignIn.signOut(); // Sign out from Google
+      // Try to sign out from Google, but don't fail if Google services are not available
+      try {
+        await _googleSignIn.signOut(); // Sign out from Google
+      } catch (googleError) {
+        print('Google sign out error (non-critical): ${googleError.toString()}');
+        // Continue with Firebase signout even if Google signout fails
+      }
+      
+      // Always try to sign out from Firebase
       await _auth.signOut(); // Sign out from Firebase
-      // return await _auth.signOut();
+      return true; // Successfully signed out from Firebase
     } catch (err) {
-      print(err.toString());
-      return null;
+      print('Sign out error: ${err.toString()}');
+      return false; // Failed to sign out
     }
   }
 }

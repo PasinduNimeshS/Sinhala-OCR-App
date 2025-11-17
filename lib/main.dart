@@ -1,10 +1,10 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_native_splash/flutter_native_splash.dart';
-import 'package:project_fyp/firebase_options.dart';
+import 'package:sin_ocr/firebase_options.dart';
 import 'package:firebase_core/firebase_core.dart';
-import 'package:project_fyp/models/user_model.dart';
-import 'package:project_fyp/screens/wrapper.dart';
-import 'package:project_fyp/services/auth.dart';
+import 'package:sin_ocr/models/user_model.dart';
+import 'package:sin_ocr/screens/wrapper.dart';
+import 'package:sin_ocr/services/auth.dart';
 import 'package:provider/provider.dart';
 
 Future<void> main() async {

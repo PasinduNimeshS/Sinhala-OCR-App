@@ -1,7 +1,7 @@
 import 'package:flutter/material.dart';
-import 'package:project_fyp/models/user_model.dart';
-import 'package:project_fyp/screens/authentication/authenticate.dart';
-import 'package:project_fyp/screens/home/home.dart';
+import 'package:sin_ocr/models/user_model.dart';
+import 'package:sin_ocr/screens/authentication/authenticate.dart';
+import 'package:sin_ocr/screens/home/home.dart';
 import 'package:provider/provider.dart';
 // import 'package:project_fyp/screens/home/home.dart';
 
