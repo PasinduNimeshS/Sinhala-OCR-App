@@ -1,5 +1,5 @@
 import 'package:flutter/material.dart';
-import 'package:sin_ocr/constants/styles.dart';
+// import 'package:sin_ocr/constants/styles.dart';
 import 'package:sin_ocr/services/auth.dart';
 
 class SignIn extends StatefulWidget {

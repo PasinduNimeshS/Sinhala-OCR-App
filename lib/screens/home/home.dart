@@ -1,20 +1,37 @@
+import 'dart:convert';
+import 'dart:io';
 import 'package:flutter/material.dart';
+import 'package:lottie/lottie.dart';
 import 'package:sin_ocr/services/auth.dart';
 import 'package:share_plus/share_plus.dart';
-import 'dart:io';
 import 'package:image_picker/image_picker.dart';
+import 'package:image_cropper/image_cropper.dart';
 import 'package:flutter/services.dart';
 import 'package:google_fonts/google_fonts.dart';
-import 'package:sin_ocr/services/ocr_services.dart'; // Add this import for Tesseract OCR
+import 'package:sin_ocr/services/ocr_services.dart';
 import 'package:sin_ocr/screens/history/history.dart';
 import 'package:sin_ocr/screens/saved/saved.dart';
+import 'package:http/http.dart' as http;
+import 'package:shared_preferences/shared_preferences.dart';
 
 class OcrItem {
   String title;
-  final String text;
+  String text;
   final DateTime date;
 
   OcrItem({required this.title, required this.text, required this.date});
+
+  Map<String, dynamic> toJson() => {
+    'title': title,
+    'text': text,
+    'date': date.toIso8601String(),
+  };
+
+  factory OcrItem.fromJson(Map<String, dynamic> json) => OcrItem(
+    title: json['title'] as String,
+    text: json['text'] as String,
+    date: DateTime.parse(json['date'] as String),
+  );
 }
 
 class Home extends StatefulWidget {
@@ -27,11 +44,20 @@ class Home extends StatefulWidget {
 class _HomeState extends State<Home> {
   final AuthServices _auth = AuthServices();
   final ImagePicker _picker = ImagePicker();
-  final OcrService _ocrService = OcrService(); // Initialize OCR service
-  String extractedText = "Extracted text will appear here...";
+  final OcrService _ocrService = OcrService();
+
+  // Default placeholder text - never changes until OCR result
+  static const String _defaultPlaceholder =
+      "Extracted text will appear here...";
+  String extractedText = _defaultPlaceholder;
+  bool isEditingText = false;
+  final TextEditingController _textController = TextEditingController();
+
   int _selectedIndex = 0;
   File? _selectedImage;
   bool _isLoading = false;
+
+  String? _selectedOcrType; // null, "printed", or "handwritten"
 
   List<OcrItem> _history = [];
   List<OcrItem> _saved = [];
@@ -39,68 +65,116 @@ class _HomeState extends State<Home> {
   static const Color primaryColor = Color(0xFF2196F3);
   static const Color backgroundColor = Colors.white;
   static const Color textColor = Color(0xFF333333);
-  static const Color secondaryColor = Color(0xFF757575);
 
   final List<String> appBarTitles = ['Sinhala OCR', 'History', 'Saved'];
 
   @override
   void initState() {
     super.initState();
-    // Initialize sample data (unchanged)
-    final now = DateTime.now();
-    _history = [
-      // OcrItem(
-      //   title: 'Scan #1',
-      //   text:
-      //       "Sample history text 1 from scan.\n\nThis is extracted Sinhala text.",
-      //   date: now.subtract(const Duration(days: 6)),
-      // ),
-      // OcrItem(
-      //   title: 'Scan #2',
-      //   text:
-      //       "Sample history text 2 from scan.\n\nAnother example of OCR output.",
-      //   date: now.subtract(const Duration(days: 2)),
-      // ),
-      // OcrItem(
-      //   title: 'Scan #3',
-      //   text: "Sample history text 3 from scan.\n\nFinal history item.",
-      //   date: now.subtract(const Duration(days: 0)),
-      // ),
-    ];
-    _saved = [
-      // OcrItem(
-      //   title: 'Saved #1',
-      //   text: "Saved text 1.\n\nImportant Sinhala OCR result to keep.",
-      //   date: now.subtract(const Duration(days: 4)),
-      // ),
-      // OcrItem(
-      //   title: 'Saved #2',
-      //   text: "Saved text 2.\n\nAnother saved extraction.",
-      //   date: now.subtract(const Duration(days: 1)),
-      // ),
-    ];
+    _textController.text = extractedText;
+    _loadData();
   }
 
-  Future<void> _pickImage({bool fromCamera = false}) async {
+  @override
+  void dispose() {
+    _textController.dispose();
+    super.dispose();
+  }
+
+  Future<void> _loadData() async {
+    final prefs = await SharedPreferences.getInstance();
+    final historyJson = prefs.getString('ocr_history');
+    final savedJson = prefs.getString('ocr_saved');
+
+    List<OcrItem> loadedHistory = [];
+    List<OcrItem> loadedSaved = [];
+
+    if (historyJson != null) {
+      final List<dynamic> list = jsonDecode(historyJson);
+      loadedHistory = list.map((e) => OcrItem.fromJson(e)).toList();
+      final now = DateTime.now();
+      loadedHistory.removeWhere(
+        (item) => now.difference(item.date).inHours >= 24,
+      );
+    }
+
+    if (savedJson != null) {
+      final List<dynamic> list = jsonDecode(savedJson);
+      loadedSaved = list.map((e) => OcrItem.fromJson(e)).toList();
+    }
+
+    if (mounted) {
+      setState(() {
+        _history = loadedHistory;
+        _saved = loadedSaved;
+      });
+      await _saveData();
+    }
+  }
+
+  Future<void> _saveData() async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString(
+      'ocr_history',
+      jsonEncode(_history.map((e) => e.toJson()).toList()),
+    );
+    await prefs.setString(
+      'ocr_saved',
+      jsonEncode(_saved.map((e) => e.toJson()).toList()),
+    );
+  }
+
+  // RESET FUNCTION - Clears everything
+  void _resetAll() {
+    setState(() {
+      _selectedImage = null;
+      _selectedOcrType = null;
+      extractedText = _defaultPlaceholder;
+      _textController.text = extractedText;
+      isEditingText = false;
+      _isLoading = false;
+    });
+  }
+
+  Future<void> _pickAndCropImage({bool fromCamera = false}) async {
     try {
-      final XFile? image = await _picker.pickImage(
+      final XFile? pickedFile = await _picker.pickImage(
         source: fromCamera ? ImageSource.camera : ImageSource.gallery,
-        maxWidth: 1800,
-        maxHeight: 1800,
-        imageQuality: 85,
+        maxWidth: 2000,
+        maxHeight: 2000,
+        imageQuality: 95,
       );
 
-      if (image != null) {
+      if (pickedFile == null) return;
+
+      final CroppedFile? croppedFile = await ImageCropper().cropImage(
+        sourcePath: pickedFile.path,
+        compressQuality: 90,
+        uiSettings: [
+          AndroidUiSettings(
+            toolbarTitle: 'Crop Image',
+            toolbarColor: primaryColor,
+            toolbarWidgetColor: Colors.white,
+            activeControlsWidgetColor: primaryColor,
+            initAspectRatio: CropAspectRatioPreset.original,
+            lockAspectRatio: false,
+          ),
+          IOSUiSettings(title: 'Crop Image'),
+        ],
+      );
+
+      if (croppedFile != null && mounted) {
         setState(() {
-          _selectedImage = File(image.path);
-          extractedText = "Image selected. Tap 'Extract Text' to process.";
+          _selectedImage = File(croppedFile.path);
+          _selectedOcrType = null;
+          // Do NOT change extractedText here — stays as placeholder
+          isEditingText = false;
         });
       }
     } catch (e) {
-      if (!mounted) return;
       ScaffoldMessenger.of(
         context,
-      ).showSnackBar(SnackBar(content: Text('Error: ${e.toString()}')));
+      ).showSnackBar(SnackBar(content: Text("Error: $e")));
     }
   }
 
@@ -111,211 +185,162 @@ class _HomeState extends State<Home> {
       );
       return;
     }
+    if (_selectedOcrType == null) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Please select document type first'),
+          backgroundColor: Colors.red,
+        ),
+      );
+      return;
+    }
 
-    setState(() {
-      _isLoading = true;
-      extractedText = "Processing image...";
-    });
+    showDialog(
+      context: context,
+      barrierDismissible: false,
+      builder: (_) => const ScanningDialog(),
+    );
+    setState(() => _isLoading = true);
 
     try {
-      // Use Tesseract OCR for text extraction (works for both gallery and camera)
-      final extracted = await _ocrService.extractText(_selectedImage!.path);
+      String result;
+      if (_selectedOcrType == 'printed') {
+        result = await _ocrService.extractText(_selectedImage!.path);
+      } else {
+        result = await _predictWithSinOcr(_selectedImage!);
+      }
+
+      if (!mounted) return;
+      Navigator.pop(context);
 
       setState(() {
         _isLoading = false;
-        extractedText = extracted;
-        // Add to history
-        final now = DateTime.now();
-        _history.insert(
-          0,
-          OcrItem(
-            title: 'Scan #${_history.length + 1}',
-            text: extracted,
-            date: now,
-          ),
-        );
-        _selectedImage = null; // Clear image after processing
+        extractedText = result.isEmpty ? 'No text detected.' : result;
+        _textController.text = extractedText;
+        isEditingText = false;
       });
+
+      final modeName =
+          _selectedOcrType == 'printed' ? 'Printed' : 'Handwritten';
+      _history.insert(
+        0,
+        OcrItem(
+          title: 'Scan #${_history.length + 1} ($modeName)',
+          text: extractedText,
+          date: DateTime.now(),
+        ),
+      );
+
+      await _saveData();
     } catch (e) {
       if (!mounted) return;
+      Navigator.pop(context);
       setState(() {
         _isLoading = false;
-        extractedText = "Error processing image: $e";
+        extractedText = "Error: $e";
+        _textController.text = extractedText;
       });
       ScaffoldMessenger.of(
         context,
-      ).showSnackBar(SnackBar(content: Text('OCR Error: $e')));
+      ).showSnackBar(SnackBar(content: Text('OCR Failed: $e')));
+    }
+  }
+
+  Future<String> _predictWithSinOcr(File imageFile) async {
+    const String baseUrl =
+        'https://my-fastapi-app-584089990948.us-central1.run.app';
+    final uri = Uri.parse('$baseUrl/predict');
+    var request = http.MultipartRequest('POST', uri);
+    request.files.add(
+      await http.MultipartFile.fromPath('file', imageFile.path),
+    );
+
+    final response = await request.send().timeout(const Duration(seconds: 45));
+    final resp = await http.Response.fromStream(response);
+
+    if (resp.statusCode == 200) {
+      final json = jsonDecode(resp.body);
+      return (json['predicted_sentence'] as String?)?.trim() ??
+          'No text returned.';
+    } else {
+      throw Exception('API Error ${resp.statusCode}');
     }
   }
 
   void _saveExtractedText() async {
+    final titleCtrl = TextEditingController(text: "Saved Scan");
+    final textCtrl = TextEditingController(text: extractedText);
+
     final result = await showDialog<String>(
       context: context,
-      builder: (context) {
-        final controller = TextEditingController(text: 'Saved Item');
-        return Dialog(
-          shape: RoundedRectangleBorder(
-            borderRadius: BorderRadius.circular(16),
-          ),
-          child: StatefulBuilder(
-            builder: (context, setDialogState) {
-              return Container(
-                constraints: const BoxConstraints(maxWidth: 400),
-                padding: const EdgeInsets.all(20),
-                child: Column(
-                  mainAxisSize: MainAxisSize.min,
-                  crossAxisAlignment: CrossAxisAlignment.stretch,
-                  children: [
-                    Text(
-                      'Save Text',
-                      style: Theme.of(
-                        context,
-                      ).textTheme.headlineSmall?.copyWith(
-                        fontWeight: FontWeight.bold,
-                        color: textColor,
-                      ),
+      builder:
+          (context) => AlertDialog(
+            title: const Text("Save Text"),
+            content: SingleChildScrollView(
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  TextField(
+                    controller: titleCtrl,
+                    decoration: const InputDecoration(
+                      labelText: "Title",
+                      border: OutlineInputBorder(),
                     ),
-                    const SizedBox(height: 16),
-                    TextField(
-                      controller: controller,
-                      style: GoogleFonts.poppins(),
-                      decoration: InputDecoration(
-                        labelText: 'Enter title',
-                        labelStyle: GoogleFonts.poppins(color: secondaryColor),
-                        border: OutlineInputBorder(
-                          borderRadius: BorderRadius.circular(12),
-                          borderSide: BorderSide(color: primaryColor),
-                        ),
-                        focusedBorder: OutlineInputBorder(
-                          borderRadius: BorderRadius.circular(12),
-                          borderSide: BorderSide(color: primaryColor, width: 2),
-                        ),
-                        errorText:
-                            controller.text.isEmpty
-                                ? 'Title is required'
-                                : null,
-                      ),
-                      onChanged: (value) {
-                        setDialogState(() {});
-                      },
+                  ),
+                  const SizedBox(height: 12),
+                  TextField(
+                    controller: textCtrl,
+                    maxLines: 8,
+                    decoration: const InputDecoration(
+                      labelText: "Text (editable)",
+                      border: OutlineInputBorder(),
+                      alignLabelWithHint: true,
                     ),
-                    const SizedBox(height: 20),
-                    Row(
-                      children: [
-                        Expanded(
-                          child: TextButton(
-                            onPressed: () => Navigator.pop(context),
-                            style: TextButton.styleFrom(
-                              foregroundColor: secondaryColor,
-                            ),
-                            child: Text('Cancel', style: GoogleFonts.poppins()),
-                          ),
-                        ),
-                        const SizedBox(width: 12),
-                        Expanded(
-                          child: ElevatedButton(
-                            onPressed: () {
-                              if (controller.text.isNotEmpty &&
-                                  extractedText !=
-                                      "Extracted text will appear here...") {
-                                Navigator.pop(context, controller.text);
-                              } else {
-                                Navigator.pop(context);
-                              }
-                            },
-                            style: ElevatedButton.styleFrom(
-                              backgroundColor: primaryColor,
-                              foregroundColor: Colors.white,
-                              shape: RoundedRectangleBorder(
-                                borderRadius: BorderRadius.circular(12),
-                              ),
-                            ),
-                            child: Text('Save', style: GoogleFonts.poppins()),
-                          ),
-                        ),
-                      ],
-                    ),
-                  ],
+                  ),
+                ],
+              ),
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.pop(context),
+                child: const Text(
+                  "Cancel",
+                  style: TextStyle(color: primaryColor),
                 ),
-              );
-            },
+              ),
+              ElevatedButton(
+                style: ElevatedButton.styleFrom(backgroundColor: primaryColor),
+                onPressed: () {
+                  extractedText = textCtrl.text;
+                  Navigator.pop(context, titleCtrl.text.trim());
+                },
+                child: const Text(
+                  "Save",
+                  style: TextStyle(color: Colors.white),
+                ),
+              ),
+            ],
           ),
-        );
-      },
     );
 
-    // Handle save logic AFTER dialog closes
-    if (result != null &&
-        result.isNotEmpty &&
-        extractedText != "Extracted text will appear here...") {
+    if (result != null && result.isNotEmpty) {
       setState(() {
         _saved.insert(
           0,
           OcrItem(title: result, text: extractedText, date: DateTime.now()),
         );
       });
-      if (mounted) {
-        ScaffoldMessenger.of(
-          context,
-        ).showSnackBar(const SnackBar(content: Text('Saved successfully')));
-      }
+      await _saveData();
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: const Text("Saved successfully!"),
+          backgroundColor: primaryColor,
+        ),
+      );
     }
   }
 
-  void _updateItemTitle({
-    required bool isHistory,
-    required int index,
-    required String newTitle,
-  }) {
-    setState(() {
-      if (isHistory) {
-        _history[index].title = newTitle;
-      } else {
-        _saved[index].title = newTitle;
-      }
-    });
-  }
-
-  void _deleteSavedItem(int index) {
-    setState(() {
-      _saved.removeAt(index);
-    });
-  }
-
-  Future<void> _signOut() async {
-    try {
-      final success = await _auth.signOut();
-      // The Wrapper widget will automatically handle navigation to login screen
-      // when the user becomes null due to the StreamProvider
-      if (mounted && context.mounted) {
-        try {
-          if (success) {
-            ScaffoldMessenger.of(context).showSnackBar(
-              const SnackBar(content: Text('Signed out successfully')),
-            );
-          } else {
-            ScaffoldMessenger.of(context).showSnackBar(
-              const SnackBar(content: Text('Sign out failed. Please try again.')),
-            );
-          }
-        } catch (scaffoldError) {
-          print('ScaffoldMessenger error: $scaffoldError');
-          // Don't show error to user if ScaffoldMessenger fails
-        }
-      }
-    } catch (e) {
-      if (mounted && context.mounted) {
-        try {
-          ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(content: Text('Sign out failed: $e')),
-          );
-        } catch (scaffoldError) {
-          print('ScaffoldMessenger error: $scaffoldError');
-          // Don't show error to user if ScaffoldMessenger fails
-        }
-      }
-    }
-  }
+  Future<void> _signOut() async => await _auth.signOut();
 
   @override
   Widget build(BuildContext context) {
@@ -332,35 +357,25 @@ class _HomeState extends State<Home> {
             backgroundColor: primaryColor,
             foregroundColor: Colors.white,
             shape: RoundedRectangleBorder(
-              borderRadius: BorderRadius.circular(12),
+              borderRadius: BorderRadius.circular(16),
             ),
-            padding: const EdgeInsets.symmetric(vertical: 16),
-            elevation: 2,
+            padding: const EdgeInsets.symmetric(vertical: 18),
+            textStyle: const TextStyle(
+              fontSize: 17,
+              fontWeight: FontWeight.w600,
+            ),
           ),
-        ),
-        appBarTheme: const AppBarTheme(
-          backgroundColor: backgroundColor,
-          elevation: 0,
-          titleTextStyle: TextStyle(
-            color: textColor,
-            fontSize: 20,
-            fontWeight: FontWeight.bold,
-          ),
-          iconTheme: IconThemeData(color: primaryColor),
-        ),
-        bottomNavigationBarTheme: const BottomNavigationBarThemeData(
-          selectedItemColor: primaryColor,
-          unselectedItemColor: secondaryColor,
         ),
       ),
       home: Scaffold(
         appBar: AppBar(
-          title: Text(appBarTitles[_selectedIndex]),
+          title: Text(
+            appBarTitles[_selectedIndex],
+            style: const TextStyle(fontWeight: FontWeight.bold),
+          ),
+          // centerTitle: true,
           actions: [
-            IconButton(
-              icon: const Icon(Icons.logout),
-              onPressed: _signOut, // Use the new method
-            ),
+            IconButton(icon: const Icon(Icons.logout), onPressed: _signOut),
           ],
         ),
         body: IndexedStack(
@@ -369,26 +384,34 @@ class _HomeState extends State<Home> {
             _buildHomeBody(),
             HistoryPage(
               items: _history,
-              onEditTitle:
-                  (index, newTitle) => _updateItemTitle(
-                    isHistory: true,
-                    index: index,
-                    newTitle: newTitle,
-                  ),
+              onEditItem: (index, newTitle, newText) {
+                setState(() {
+                  _history[index].title = newTitle;
+                  _history[index].text = newText;
+                });
+                _saveData();
+              },
             ),
             SavedPage(
               items: _saved,
-              onEditTitle:
-                  (index, newTitle) => _updateItemTitle(
-                    isHistory: false,
-                    index: index,
-                    newTitle: newTitle,
-                  ),
-              onDelete: _deleteSavedItem,
+              onEditItem: (index, newTitle, newText) {
+                setState(() {
+                  _saved[index].title = newTitle;
+                  _saved[index].text = newText;
+                });
+                _saveData();
+              },
+              onDelete: (index) {
+                setState(() => _saved.removeAt(index));
+                _saveData();
+              },
             ),
           ],
         ),
         bottomNavigationBar: BottomNavigationBar(
+          currentIndex: _selectedIndex,
+          selectedItemColor: primaryColor,
+          onTap: (i) => setState(() => _selectedIndex = i),
           items: const [
             BottomNavigationBarItem(icon: Icon(Icons.home), label: 'Home'),
             BottomNavigationBarItem(
@@ -397,186 +420,369 @@ class _HomeState extends State<Home> {
             ),
             BottomNavigationBarItem(icon: Icon(Icons.bookmark), label: 'Saved'),
           ],
-          currentIndex: _selectedIndex,
-          onTap: _onItemTapped,
         ),
       ),
     );
-  }
-
-  void _onItemTapped(int index) {
-    setState(() {
-      _selectedIndex = index;
-    });
   }
 
   Widget _buildHomeBody() {
     return SingleChildScrollView(
-      child: Padding(
-        padding: const EdgeInsets.all(20.0),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            Row(
-              mainAxisAlignment: MainAxisAlignment.spaceEvenly,
-              children: [
-                Expanded(
-                  child: _buildActionButton(
-                    icon: Icons.upload_file,
-                    label: 'Upload Image',
-                    onPressed: _pickImage,
-                  ),
-                ),
-                const SizedBox(width: 16),
-                Expanded(
-                  child: _buildActionButton(
-                    icon: Icons.camera_alt,
-                    label: 'Scan Image',
-                    onPressed: () => _pickImage(fromCamera: true),
-                  ),
-                ),
-              ],
-            ),
-            const SizedBox(height: 32),
-            if (_selectedImage != null) _buildImagePreview(),
-            const SizedBox(height: 16),
-            _buildExtractButton(),
-            const SizedBox(height: 24),
-            _buildExtractedTextCard(),
-          ],
-        ),
-      ),
-    );
-  }
-
-  Widget _buildActionButton({
-    required IconData icon,
-    required String label,
-    required VoidCallback onPressed,
-  }) {
-    return ElevatedButton.icon(
-      icon: Icon(icon),
-      label: Text(label),
-      onPressed: onPressed,
-    );
-  }
-
-  Widget _buildImagePreview() {
-    return Card(
-      elevation: 2,
-      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
-      child: Stack(
+      padding: const EdgeInsets.all(15),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          ClipRRect(
-            borderRadius: BorderRadius.circular(16),
-            child: Image.file(
-              _selectedImage!,
-              fit: BoxFit.cover,
-              height: 220,
-              width: double.infinity,
-            ),
+          // Upload & Scan Buttons
+          Row(
+            children: [
+              Expanded(
+                child: ElevatedButton.icon(
+                  icon: const Icon(Icons.upload_file, size: 20),
+                  label: const Text(
+                    'Upload Image',
+                    style: TextStyle(fontSize: 14),
+                  ),
+                  onPressed: () => _pickAndCropImage(fromCamera: false),
+                ),
+              ),
+              const SizedBox(width: 16),
+              Expanded(
+                child: ElevatedButton.icon(
+                  icon: const Icon(Icons.camera_alt, size: 20),
+                  label: const Text(
+                    'Scan Image',
+                    style: TextStyle(fontSize: 14),
+                  ),
+                  onPressed: () => _pickAndCropImage(fromCamera: true),
+                ),
+              ),
+            ],
           ),
-          Positioned(
-            top: 8,
-            right: 8,
-            child: CircleAvatar(
-              backgroundColor: Colors.black54,
-              child: IconButton(
-                icon: const Icon(Icons.close, color: Colors.white),
-                onPressed: () {
-                  setState(() {
-                    _selectedImage = null;
-                    extractedText = "Extracted text will appear here...";
-                  });
-                },
+
+          const SizedBox(height: 32),
+
+          // Image Preview
+          if (_selectedImage != null)
+            Card(
+              elevation: 6,
+              shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(20),
+              ),
+              child: Stack(
+                children: [
+                  ClipRRect(
+                    borderRadius: BorderRadius.circular(20),
+                    child: Image.file(
+                      _selectedImage!,
+                      height: 300,
+                      width: double.infinity,
+                      fit: BoxFit.cover,
+                    ),
+                  ),
+                  Positioned(
+                    top: 12,
+                    right: 12,
+                    child: CircleAvatar(
+                      backgroundColor: Colors.black54,
+                      child: IconButton(
+                        icon: const Icon(Icons.close, color: Colors.white),
+                        onPressed: _resetAll,
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+
+          // Document Type Dropdown — Only when image selected
+          if (_selectedImage != null) ...[
+            const SizedBox(height: 20),
+            const Text(
+              "Select Document Type",
+              style: TextStyle(
+                fontSize: 16,
+                fontWeight: FontWeight.bold,
+                color: textColor,
+              ),
+            ),
+            const SizedBox(height: 12),
+            Card(
+              elevation: 3,
+              shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(16),
+              ),
+              child: Padding(
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 16,
+                  vertical: 8,
+                ),
+                child: DropdownButtonHideUnderline(
+                  child: DropdownButton<String>(
+                    value: _selectedOcrType,
+                    hint: const Text(
+                      "Choose type...",
+                      style: TextStyle(color: Colors.grey),
+                    ),
+                    isExpanded: true,
+                    icon: const Icon(
+                      Icons.arrow_drop_down,
+                      color: primaryColor,
+                    ),
+                    style: const TextStyle(color: textColor, fontSize: 16),
+                    items: const [
+                      DropdownMenuItem(
+                        value: "printed",
+                        child: Text("Printed Text"),
+                      ),
+                      DropdownMenuItem(
+                        value: "handwritten",
+                        child: Text("Handwritten Text"),
+                      ),
+                    ],
+                    onChanged:
+                        (value) => setState(() => _selectedOcrType = value),
+                  ),
+                ),
+              ),
+            ),
+          ],
+
+          const SizedBox(height: 32),
+
+          // Extract Button
+          ElevatedButton.icon(
+            icon:
+                _isLoading
+                    ? const SizedBox(
+                      width: 24,
+                      height: 24,
+                      child: CircularProgressIndicator(
+                        color: Colors.white,
+                        strokeWidth: 3,
+                      ),
+                    )
+                    : const Icon(Icons.text_fields, size: 28),
+            label: Text(
+              _isLoading ? 'Extracting...' : 'Extract Text',
+              style: const TextStyle(fontSize: 18),
+            ),
+            style: ElevatedButton.styleFrom(
+              backgroundColor:
+                  _selectedOcrType == null
+                      ? Colors.grey.shade400
+                      : primaryColor,
+              padding: const EdgeInsets.symmetric(vertical: 18),
+            ),
+            onPressed:
+                _selectedOcrType == null || _isLoading ? null : _extractText,
+          ),
+
+          if (_selectedImage != null && _selectedOcrType == null)
+            const Padding(
+              padding: EdgeInsets.only(top: 10),
+              child: Text(
+                "Please select document type above",
+                style: TextStyle(color: Colors.red, fontSize: 14),
+                textAlign: TextAlign.center,
+              ),
+            ),
+
+          const SizedBox(height: 32),
+
+          // Extracted Text Card
+          Card(
+            elevation: 6,
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(20),
+            ),
+            child: Padding(
+              padding: const EdgeInsets.all(10),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Row(
+                    children: [
+                      const Expanded(
+                        child: Text(
+                          'Extracted Text',
+                          style: TextStyle(
+                            fontSize: 14,
+                            fontWeight: FontWeight.bold,
+                            color: primaryColor,
+                          ),
+                        ),
+                      ),
+                      Wrap(
+                        spacing: 0,
+                        children: [
+                          if (extractedText != _defaultPlaceholder &&
+                              !extractedText.startsWith("Error:") &&
+                              !isEditingText)
+                            IconButton(
+                              icon: Icon(
+                                Icons.edit,
+                                // color: primaryColor,
+                                size: 20,
+                              ),
+                              onPressed:
+                                  () => setState(() => isEditingText = true),
+                            ),
+                          if (isEditingText)
+                            IconButton(
+                              icon: const Icon(
+                                Icons.check_circle,
+                                color: Colors.green,
+                                size: 20,
+                              ),
+                              onPressed:
+                                  () => setState(() {
+                                    extractedText = _textController.text.trim();
+                                    isEditingText = false;
+                                  }),
+                            ),
+                          IconButton(
+                            icon: const Icon(Icons.copy, size: 20),
+                            onPressed: () {
+                              Clipboard.setData(
+                                ClipboardData(text: extractedText),
+                              );
+                              ScaffoldMessenger.of(context).showSnackBar(
+                                const SnackBar(content: Text("Copied!")),
+                              );
+                            },
+                          ),
+                          IconButton(
+                            icon: Icon(Icons.share, size: 20),
+                            onPressed: () => Share.share(extractedText),
+                          ),
+                          IconButton(
+                            icon: Icon(
+                              Icons.bookmark_add,
+                              // color: primaryColor,
+                              size: 20,
+                            ),
+                            onPressed: _saveExtractedText,
+                          ),
+                        ],
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 5),
+                  const Divider(),
+                  const SizedBox(height: 10),
+                  isEditingText
+                      ? TextField(
+                        controller: _textController,
+                        maxLines: null,
+                        decoration: InputDecoration(
+                          filled: true,
+                          fillColor: Colors.grey.shade50,
+                          hintText: "Edit text here...",
+                          border: OutlineInputBorder(
+                            borderRadius: BorderRadius.circular(14),
+                          ),
+                          contentPadding: const EdgeInsets.all(16),
+                        ),
+                      )
+                      : SelectableText(
+                        extractedText,
+                        style: TextStyle(
+                          fontSize: 16,
+                          height: 1.8,
+                          color:
+                              extractedText == _defaultPlaceholder
+                                  ? Colors.grey.shade600
+                                  : textColor,
+                        ),
+                      ),
+                  if (extractedText == _defaultPlaceholder)
+                    const Padding(
+                      padding: EdgeInsets.only(top: 10),
+                      child: Text(
+                        "Upload an image and extract text",
+                        style: TextStyle(
+                          color: Colors.grey,
+                          fontStyle: FontStyle.italic,
+                        ),
+                      ),
+                    ),
+                ],
               ),
             ),
           ),
+
+          // RESET BUTTON - Only show after OCR or image upload
+          if (_selectedImage != null ||
+              extractedText != _defaultPlaceholder) ...[
+            const SizedBox(height: 24),
+            OutlinedButton.icon(
+              icon: const Icon(Icons.refresh, color: primaryColor),
+              label: const Text(
+                "Reset All",
+                style: TextStyle(
+                  fontSize: 16,
+                  color: primaryColor,
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
+              style: OutlinedButton.styleFrom(
+                side: const BorderSide(color: primaryColor, width: 2),
+                padding: const EdgeInsets.symmetric(vertical: 16),
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(16),
+                ),
+              ),
+              onPressed: _resetAll,
+            ),
+          ],
+
+          const SizedBox(height: 40),
         ],
       ),
     );
   }
+}
 
-  Widget _buildExtractButton() {
-    return ElevatedButton.icon(
-      icon:
-          _isLoading
-              ? const SizedBox(
-                width: 20,
-                height: 20,
-                child: CircularProgressIndicator(
-                  strokeWidth: 2,
-                  valueColor: AlwaysStoppedAnimation<Color>(Colors.white),
-                ),
-              )
-              : const Icon(Icons.text_fields),
-      label: Text(_isLoading ? 'Processing...' : 'Extract Text'),
-      onPressed: _isLoading ? null : _extractText,
-    );
-  }
+class ScanningDialog extends StatelessWidget {
+  const ScanningDialog({super.key});
 
-  Widget _buildExtractedTextCard() {
-    return Card(
-      elevation: 4,
-      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
-      child: Padding(
-        padding: const EdgeInsets.all(12.0),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Row(
-              mainAxisAlignment: MainAxisAlignment.spaceBetween,
-              children: [
-                Flexible(
-                  // Wrap title in Flexible to prevent overflow
-                  child: Text(
-                    'Extracted Text',
-                    style: Theme.of(
-                      context,
-                    ).textTheme.titleLarge?.copyWith(color: primaryColor),
-                    overflow: TextOverflow.ellipsis, // Handle long titles
-                  ),
+  @override
+  Widget build(BuildContext context) {
+    return PopScope(
+      canPop: false,
+      child: Dialog(
+        backgroundColor: Colors.black.withOpacity(0.95),
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(24)),
+        child: Padding(
+          padding: EdgeInsets.all(40),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Lottie.asset(
+                'assets/animations/Scanner.json',
+                width: 260,
+                height: 260,
+                fit: BoxFit.contain,
+                repeat: true,
+              ),
+              SizedBox(height: 30),
+              Text(
+                'Analyzing...',
+                style: TextStyle(
+                  color: Colors.white,
+                  fontSize: 20,
+                  fontWeight: FontWeight.bold,
                 ),
-                // const SizedBox(width: 5), // Small gap
-                Flexible(
-                  // Wrap icons Row in Flexible for better wrapping
-                  child: Row(
-                    mainAxisSize: MainAxisSize.min, // Minimize row size
-                    children: [
-                      IconButton(
-                        icon: const Icon(Icons.copy, color: primaryColor),
-                        onPressed: () {
-                          Clipboard.setData(ClipboardData(text: extractedText));
-                          if (!mounted) return;
-                          ScaffoldMessenger.of(context).showSnackBar(
-                            const SnackBar(
-                              content: Text('Text copied to clipboard'),
-                            ),
-                          );
-                        },
-                      ),
-                      IconButton(
-                        icon: const Icon(Icons.share, color: primaryColor),
-                        onPressed: () {
-                          Share.share(extractedText);
-                        },
-                      ),
-                      IconButton(
-                        icon: const Icon(
-                          Icons.bookmark_add,
-                          color: primaryColor,
-                        ),
-                        onPressed: _saveExtractedText,
-                      ),
-                    ],
-                  ),
-                ),
-              ],
-            ),
-            const Divider(color: secondaryColor),
-            const SizedBox(height: 12),
-            Text(extractedText, style: Theme.of(context).textTheme.bodyLarge),
-          ],
+              ),
+              SizedBox(height: 12),
+              Text(
+                'Please wait while we extract the text',
+                style: TextStyle(color: Colors.white70, fontSize: 16),
+                textAlign: TextAlign.center,
+              ),
+              SizedBox(height: 30),
+              CircularProgressIndicator(color: Colors.white, strokeWidth: 4),
+            ],
+          ),
         ),
       ),
     );

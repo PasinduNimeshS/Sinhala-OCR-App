@@ -1,6 +1,5 @@
 import 'package:flutter/material.dart';
 
-
 const TextStyle descriptionStyle = TextStyle(
   fontSize: 12,
   color: Color(0xffB43F3F),
